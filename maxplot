@@ -1,0 +1,124 @@
+
+library(readxl)
+library(drda)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(openxlsx)
+
+data <- read_excel("C:/Users/Choukri-A/Desktop/exp.xlsx")
+
+molecules <- unique(data$Molecule)
+
+max_responses <- numeric(length(molecules))
+se_max_responses <- numeric(length(molecules))
+ec50s <- numeric(length(molecules))
+se_ec50s <- numeric(length(molecules))
+
+summaries <- list()
+anova_results <- list()
+plots_list <- list()
+
+for(i in seq_along(molecules)) {
+  molecule <- molecules[i]
+  
+  subset_data <- subset(data, Molecule == molecule)
+
+  subset_data <- subset_data %>%
+    filter(Concentration > 0)
+
+  fit <- drda(Response ~ log10(Concentration), data = subset_data, mean_function = "gz")
+
+  anova_results[[molecule]] <- anova(fit)
+
+  params <- coef(fit)
+  se_params <- sqrt(diag(vcov(fit)))
+
+  ec50 <- 10^(params["phi"])  # Convert back from log scale
+  se_ec50 <- abs(se_params["phi"] * ec50 * log(10))  # Delta method approximation
+
+  max_response <- params["alpha"] + params["delta"]
+  se_max_response <- sqrt(se_params["alpha"]^2 + se_params["delta"]^2)  # Propagation of error
+
+  max_responses[i] <- max_response
+  se_max_responses[i] <- se_max_response
+  ec50s[i] <- ec50
+  se_ec50s[i] <- se_ec50
+  
+  summaries[[molecule]] <- capture.output(summary(fit))
+
+  file_name <- paste0("Dose_Responses_Plot45_", molecule, ".png")
+  
+  png(file_name, width = 800, height = 600)
+
+  plot(fit, main = paste("Best model fit for", molecule), xlab = "log10(dose)",
+       cex.main = 1.5, # Increase title font size
+       cex.lab = 4,  # Increase axis labels font size
+       cex.axis = 2, # Increase axis text font size
+       col.axis = "blue", # Change axis color
+       col.lab = "red", # Change label color
+       col.main = "darkgreen", # Change title color
+       pch = 19, # Change type of points in the plot
+       col = "darkorange", # Change color of points
+       lwd = 5, # Increase line width
+       lty = 5) # Change line type
+  
+  grid(nx = NULL, ny = NULL, col = "gray", lty = "dotted")
+ 
+  dev.off()
+  
+  plots_list[[molecule]] <- file_name
+}
+
+results <- data.frame(
+  Molecule = molecules, 
+  MaxResponse = max_responses, 
+  SE_MaxResponse = se_max_responses, 
+  EC50 = ec50s, 
+  SE_EC50 = se_ec50s
+)
+
+print(results)
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "Results")
+writeData(wb, "Results", results)
+
+for(i in seq_along(molecules)) {
+  addWorksheet(wb, paste("Summary_", molecules[i]))
+  writeData(wb, paste("Summary_", molecules[i]), summaries[[molecules[i]]])
+  addWorksheet(wb, paste("ANOVA_", molecules[i]))
+  writeData(wb, paste("ANOVA_", molecules[i]), anova_results[[molecules[i]]])
+  writeData(wb, paste("Summary_", molecules[i]), xlsxCell(1, 10, plots_list[[molecules[i]]]))
+}
+
+saveWorkbook(wb, "C:/Users/Choukri-A/Desktop/Dose_Response_Summary_ANOVA_Plots.xlsx", overwrite = TRUE)
+
+ec50_plot <- ggplot(results, aes(x = EC50, y = Molecule)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(xmin = EC50 - SE_EC50, xmax = EC50 + SE_EC50), width = 0.2) +
+  scale_x_log10() +
+  labs(title = "EC50 Values", x = "EC50 (log scale)", y = NULL) +
+  theme_minimal() +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(hjust = 1),
+        axis.ticks.y = element_blank(),
+        legend.position = "none") +
+  scale_y_discrete(position = "right")
+
+ggsave("EC50_Plot1.png", ec50_plot, width = 10, height = 8, units = "in")
+
+max_response_plot <- ggplot(results, aes(x = Molecule, y = MaxResponse)) +
+  geom_bar(stat = "identity", fill = "lightgreen") +
+  geom_errorbar(aes(ymin = MaxResponse - SE_MaxResponse, ymax = MaxResponse + SE_MaxResponse), width = 0.2) +
+  labs(title = "Maximum Responses", x = NULL, y = "Maximum Response") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right",
+        legend.justification = "top",
+        legend.box.just = "right")
+
+ggsave("Max_Response_Plot1.png", max_response_plot, width = 10, height = 8, units = "in")
+
+grid.arrange(ec50_plot, max_response_plot, nrow = 2)
