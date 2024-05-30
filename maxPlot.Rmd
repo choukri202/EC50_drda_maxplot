@@ -1,0 +1,358 @@
+---
+title: "maxPlot"
+author: "AHMED CHOUKRI"
+Version: "1.0"
+---
+
+## Brief introdution to maxPlot
+
+Designed to generate, from normalized or not normalized data, dose-response curves, downstream steps involve: 
+1. verifying density distribution; 
+2. bimodal/normality/variance homogeneity assumptions test; 
+3. ANOVA test to choose the appropriate model to draw the curve of dose response and  
+4. generating the dose response curves with confidence intervals, the maximum response and EC50s graphs for each molecule, and the respective error bars; and 
+5. for the case of independent measurements, the output can be assembled for statistical assessment, which in turn generates Ec50s and maximum values with the signification levels assigned by letters. 
+
+## Verifying and installing the packages
+```{r}
+check_and_install_packages <- function(packages) {
+  for(package in packages) {
+    if(!require(package, character.only = TRUE)) {
+      install.packages(package)
+      library(package, character.only = TRUE)
+    }
+  }
+}
+
+packages <- c("readxl", "drda", "ggplot2", "dplyr", "gridExtra", "openxlsx", "car","FSA", "multcompView", "diptest")
+
+check_and_install_packages(packages)
+
+library(readxl)
+library(drda)
+library(ggplot2)
+library(dplyr)
+library(car)
+library(diptest)
+library(FSA)
+library(multcompView)
+library(openxlsx)
+```
+
+## 1. Raw Data file
+
+Raw data file needs to have three columns ('Molecule'), ('Concentration'), ('Response').
+For this version of maxPlot, data shouldn't have '+ control' or 'blank' modalities because it assumes that data to be adjusted.
+
+```{r}
+file_path <- "C:/Users/Choukri-A/Desktop/exp.xlsx"
+
+data <- read_excel(file_path)
+```
+
+## 2. Data distribution overview (dip.test if for bimodality's test)
+1. verifying density distribution; 
+2. bimodal/normality/variance homogeneity assumptions test; 
+```{r}
+
+shapiro_result <- shapiro.test(data$Response)
+print(shapiro_result)
+
+
+dip_result <- dip.test(data$Response)
+print(dip_result)
+
+
+levene_result <- car::leveneTest(data$Response, group = data$Molecule)
+print(levene_result)
+
+
+shapiro_df <- data.frame(Test = "Shapiro-Wilk Test", Statistic = shapiro_result$statistic, p.value = shapiro_result$p.value)
+dip_df <- data.frame(Test = "Hartigan's Dip Test", Statistic = dip_result$statistic, p.value = dip_result$p.value)
+levene_df <- data.frame(Test = "Levene's Test", Statistic = levene_result[1, "F value"], p.value = levene_result[1, "Pr(>F)"])
+
+distribution_overview <- rbind(shapiro_df, dip_df, levene_df)
+
+wb_tests <- createWorkbook()
+
+addWorksheet(wb_tests, "Distribution Overview")
+
+writeData(wb_tests, "Distribution Overview", x = distribution_overview, startRow = 1, startCol = 1)
+
+saveWorkbook(wb_tests, "Distribution_Tests.xlsx", overwrite = TRUE)
+
+
+png("QQplot_Response.png", width = 800, height = 600)
+
+qqnorm(data$Response, main = "Q-Q plot of Response values")
+qqline(data$Response)
+
+dev.off()
+
+png("DensityPlot_Response.png", width = 800, height = 600)
+
+plot(density(data$Response), main = "Density plot of Response values", xlab = "Response")
+
+dev.off()
+```
+
+## 3. ANOVA test to choose the appropriate model to draw the curve of dose response and  
+## 4. Generating the dose response curves with confidence intervals
+This part is for extracting model parameters and their standard errors by creating a loop, watch out the excel file for model selection (4-parameters, 5 parameters or 2 parameters)
+This is not ggplot based, it's the default plot() option by drda package, it plots the best model fit for a given molecule/germination stimulant with confidence interval highlighted.
+'phi' which is the log10EC50, is used to define the threshold to draw the curve which is set at -1 (less than -1 means the curve can be drawn).
+The latter step will create a dataframe withe values strictly less or equal -1 for the upcoming plot.
+```{r}
+molecules <- unique(data$Molecule)
+
+summaries <- list()
+anova_results <- list()
+plots_list <- list()
+
+max_responses <- rep(NA, length(molecules))
+se_max_responses <- rep(NA, length(molecules))
+ec50s <- rep(NA, length(molecules))
+se_ec50s <- rep(NA, length(molecules))
+
+for(i in seq_along(molecules)) {
+  molecule <- molecules[i]
+  
+  subset_data <- subset(data, Molecule == molecule)
+
+  subset_data <- subset_data %>%
+    filter(Concentration > 0)
+  
+  fit <- drda(Response ~ log10(Concentration), data = subset_data, mean_function = "gz")
+
+  params <- coef(fit)
+  se_params <- sqrt(diag(vcov(fit)))
+  
+  ec50 <- 10^(params["phi"])  
+  se_ec50 <- abs(se_params["phi"] * ec50 * log(10)) 
+
+  max_response <- params["alpha"] + params["delta"]
+  se_max_response <- sqrt(se_params["alpha"]^2 + se_params["delta"]^2)  # error propagation was used here
+
+  if(params["phi"] <= -1) {  
+    ec50s[i] <- ec50
+    se_ec50s[i] <- se_ec50
+  }
+  max_responses[i] <- max_response
+  se_max_responses[i] <- se_max_response
+  
+  file_name <- paste0("Dose_Responses_Plot_", molecule, ".png")
+  
+  png(file_name, width = 800, height = 600)
+
+  if(params["phi"] > -1) {
+    plot(log10(subset_data$Concentration), subset_data$Response, main = paste("Non-fitted case:", molecule), xlab = "log10(dose)",
+         cex.main = 1.5, 
+         cex.lab = 4,  
+         cex.axis = 2, 
+         col.axis = "blue", 
+         col.lab = "red", 
+         col.main = "darkgreen", 
+         pch = 19, 
+         col = "darkorange", 
+         lwd = 5, 
+         lty = 5) 
+    
+   
+    grid(nx = NULL, ny = NULL, col = "gray", lty = "dotted")
+  } else {
+    
+    plot(fit, main = paste("Best model fit for", molecule), xlab = "log10(dose)",
+         cex.main = 1.5, 
+         cex.lab = 4,  
+         cex.axis = 2, 
+         col.axis = "blue", 
+         col.lab = "red", 
+         col.main = "darkgreen", 
+         pch = 19, 
+         col = "darkorange", 
+         lwd = 5, 
+         lty = 5) 
+    
+    
+    grid(nx = NULL, ny = NULL, col = "gray", lty = "dotted")
+  }
+  
+  dev.off()
+  
+  plots_list[[molecule]] <- file_name 
+}
+
+```
+
+# 5. Saving the numerical results in excel file on the working directory
+Do not change the name of the files generated
+
+```{r}
+results <- data.frame(
+  Molecule = molecules, 
+  MaxResponse = max_responses, 
+  SE_MaxResponse = se_max_responses, 
+  EC50 = ec50s, 
+  SE_EC50 = se_ec50s
+)
+
+print(results)
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "Results")
+
+writeData(wb, "Results", results, startRow = 1, startCol = 1)
+
+for(i in seq_along(molecules)) {
+  addWorksheet(wb, paste("Summary_", molecules[i]))
+  writeData(wb, paste("Summary_", molecules[i]), summaries[[molecules[i]]])    
+  addWorksheet(wb, paste("ANOVA_", molecules[i]))
+  writeData(wb, paste("ANOVA_", molecules[i]), anova_results[[molecules[i]]])
+  writeData(wb, paste("Summary_", molecules[i]), startCol = 10, startRow = 1, plots_list[[molecules[i]]])
+}
+
+filename <- tools::file_path_sans_ext(basename(file_path))
+
+output_file <- paste0("Dose_Response_Summary_ANOVA_Plots_", filename, ".xlsx")
+
+saveWorkbook(wb, output_file, overwrite = TRUE)
+```
+
+# 6. Generating the maximum response and EC50s graphs for each molecule, and the respective error bars
+The generated graphs aren't that cool but they show clearly the variations amongest the molecules.
+```{r}
+ec50_plot <- ggplot(results[!is.na(results$EC50), ], aes(x = EC50, y = Molecule)) + 
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(xmin = EC50 - SE_EC50, xmax = EC50 + SE_EC50), width = 0.2) +
+  scale_x_continuous(trans = 'log10', breaks = 10^seq(-14, -1, by = 1)) + 
+  coord_cartesian(xlim = c(10^-14, 10^-1)) +  
+  labs(title = "EC50 Values", x = "EC50 (log scale)", y = NULL) +
+  theme_minimal() +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(hjust = 1),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.text.x = element_text(size = 12)) +  
+  scale_y_discrete(position = "right")
+
+ggsave("EC50_Plot.png", ec50_plot, width = 10, height = 8, units = "in")
+
+max_response_plot <- ggplot(results, aes(x = Molecule, y = MaxResponse)) +
+  geom_bar(stat = "identity", fill = "lightgreen") +
+  geom_errorbar(aes(ymin = MaxResponse - SE_MaxResponse, ymax = MaxResponse + SE_MaxResponse), width = 0.2) +
+  labs(title = "Maximum Responses", x = NULL, y = "Maximum Response") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right",
+        legend.justification = "top",
+        legend.box.just = "right")
+
+ggsave("Max_Response_Plot.png", max_response_plot, width = 10, height = 8, units = "in")
+
+grid.arrange(ec50_plot, max_response_plot, nrow = 2)
+```
+
+# 7. Assemble independant measurements for statitsics
+For the case of independent measurements, the output can be assembled for statistical assessment, which in turn generates Ec50s and maximum values with the signification levels assigned by letters.
+```{r eval=FALSE, echo=FALSE}
+
+files <- list.files(pattern = "^Dose_Response_Summary_ANOVA_Plots")
+
+all_results <- data.frame()
+
+for(file in files) {
+  results <- read_excel(file, sheet = "Results")
+  
+  results$Molecule <- as.factor(results$Molecule)
+  
+  all_results <- rbind(all_results, results)
+}
+
+anova_result_EC50 <- aov(EC50 ~ Molecule, data = all_results)
+anova_result_MaxResponse <- aov(MaxResponse ~ Molecule, data = all_results)
+
+tukey_result_EC50 <- TukeyHSD(anova_result_EC50)
+tukey_result_MaxResponse <- TukeyHSD(anova_result_MaxResponse)
+
+group_letters_EC50 <- multcompLetters(tukey_result_EC50$Molecule[, "p adj"])
+group_letters_MaxResponse <- multcompLetters(tukey_result_MaxResponse$Molecule[, "p adj"])
+
+results_df <- data.frame(
+  Molecule = levels(all_results$Molecule),
+  EC50_p_value = tukey_result_EC50$Molecule[, "p adj"],
+  MaxResponse_p_value = tukey_result_MaxResponse$Molecule[, "p adj"],
+  EC50_rank = group_letters_EC50$Letters,
+  MaxResponse_rank = group_letters_MaxResponse$Letters
+)
+
+all_results <- merge(all_results, results_df, by = "Molecule")
+
+aggregated_results <- all_results %>%
+  group_by(Molecule) %>%
+  summarise(
+    Count = n(),
+    Mean_EC50 = mean(EC50, na.rm = TRUE),
+    SD_EC50 = ifelse(n() > 1, sd(EC50, na.rm = TRUE), 0),
+    SE_EC50 = ifelse(n() > 1, sd(EC50, na.rm = TRUE) / sqrt(n()), 0),
+    Mean_MaxResponse = mean(MaxResponse, na.rm = TRUE),
+    SD_MaxResponse = ifelse(n() > 1, sd(MaxResponse, na.rm = TRUE), 0),
+    SE_MaxResponse = ifelse(n() > 1, sd(MaxResponse, na.rm = TRUE) / sqrt(n()), 0),
+    EC50_rank = first(EC50_rank),
+    MaxResponse_rank = first(MaxResponse_rank)
+  )
+
+print(aggregated_results)
+
+ec50_plot <- ggplot(aggregated_results, aes(x = Mean_EC50, y = Molecule)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(xmin = Mean_EC50 - SE_EC50, xmax = Mean_EC50 + SE_EC50), width = 0.2) +
+  geom_text(aes(label = EC50_rank), hjust = -0.5, size = 4) +  
+  scale_x_continuous(trans = 'log10', breaks = 10^seq(-14, -1, by = 1)) +  
+  coord_cartesian(xlim = c(10^-14, 10^-1)) +  
+  labs(title = "EC50 Values -Tukey's HSD test", x = "EC50 (log scale)", y = NULL) +
+  theme_minimal() +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(hjust = 1),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.text.x = element_text(size = 12)) +  
+  scale_y_discrete(position = "right")
+
+ggsave("EC50_Plot1.png", ec50_plot, width = 10, height = 8, units = "in")
+
+max_response_plot <- ggplot(aggregated_results, aes(x = Molecule, y = Mean_MaxResponse)) +
+  geom_bar(stat = "identity", fill = "lightgreen") +
+  geom_errorbar(aes(ymin = Mean_MaxResponse - SE_MaxResponse, ymax = Mean_MaxResponse + SE_MaxResponse), width = 0.2) +
+  geom_text(aes(label = MaxResponse_rank), vjust = -0.3, hjust = -0.5, size = 4) +  
+  labs(title = "Maximum Responses", x = NULL, y = "Maximum Response") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right",
+        legend.justification = "top",
+        legend.box.just = "right")
+
+ggsave("Max_Response_Plot1.png", max_response_plot, width = 10, height = 8, units = "in")
+
+
+grid.arrange(ec50_plot, max_response_plot, nrow = 2)
+
+tukey_df_EC50 <- data.frame(tukey_result_EC50$Molecule)
+tukey_df_MaxResponse <- data.frame(tukey_result_MaxResponse$Molecule)
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "Results")
+writeData(wb, "Results", results_df)
+
+addWorksheet(wb, "Tukey Summary EC50")
+writeData(wb, "Tukey Summary EC50", tukey_df_EC50)
+
+addWorksheet(wb, "Tukey Summary MaxResponse")
+writeData(wb, "Tukey Summary MaxResponse", tukey_df_MaxResponse)
+addWorksheet(wb, "Aggregated Results")
+writeData(wb, "Aggregated Results", aggregated_results)
+
+saveWorkbook(wb, "Final_statistics.xlsx", overwrite = TRUE)
+
+```
